@@ -1,0 +1,132 @@
+Only in gcc-13.2.0_old/: ar-lib
+Only in gcc-13.2.0_old/: ChangeLog
+Only in gcc-13.2.0_old/: compile
+Only in gcc-13.2.0/: config.log
+Only in gcc-13.2.0_old/: config.rpath
+Only in gcc-13.2.0/: config.status
+Only in gcc-13.2.0_old/: config.sub
+Only in gcc-13.2.0_old/: configure
+Only in gcc-13.2.0_old/: configure.ac
+Only in gcc-13.2.0_old/: COPYING3
+Only in gcc-13.2.0_old/gcc: c-family
+Only in gcc-13.2.0_old/gcc: common
+Only in gcc-13.2.0_old/gcc: doc
+Only in gcc-13.2.0_old/gcc: fortran
+Only in gcc-13.2.0_old/gcc: ginclude
+Only in gcc-13.2.0_old/gcc: lto
+Only in gcc-13.2.0_old/gcc: objc
+Only in gcc-13.2.0_old/gcc: objcp
+diff -ru gcc-13.2.0_old/gcc/tree-cfg.cc gcc-13.2.0/gcc/tree-cfg.cc
+--- gcc-13.2.0_old/gcc/tree-cfg.cc	2023-07-27 11:13:07.000000000 +0300
++++ gcc-13.2.0/gcc/tree-cfg.cc	2024-04-20 21:15:16.275392000 +0300
+@@ -9599,6 +9599,38 @@
+ 
+ }; // class pass_warn_function_return
+ 
++static void
++gimple_init_for_auto_var (tree decl,
++			      enum auto_init_type init_type,
++			      gimple_stmt_iterator *gsi)
++{
++  if (init_type == AUTO_INIT_UNINITIALIZED)
++    init_type = AUTO_INIT_ZERO;
++
++  tree decl_size = TYPE_SIZE_UNIT (TREE_TYPE (decl));
++
++  tree init_type_node
++    = build_int_cst (integer_type_node, (int) init_type);
++
++  tree decl_name = NULL_TREE;
++  if (DECL_NAME (decl))
++
++    decl_name = build_string_literal (DECL_NAME (decl));
++
++  else
++    {
++      char decl_name_anonymous[3 + (HOST_BITS_PER_INT + 2) / 3];
++      sprintf (decl_name_anonymous, "D.%u", DECL_UID (decl));
++      decl_name = build_string_literal (decl_name_anonymous);
++    }
++
++  gimple* call = gimple_build_call_internal (IFN_DEFERRED_INIT, 3,
++					                                decl_size, init_type_node,
++					                                decl_name);
++  gimple_call_set_lhs (call, decl);
++  gsi_replace (gsi, call, false);
++}
++
+ unsigned int
+ pass_warn_function_return::execute (function *fun)
+ {
+@@ -9661,6 +9693,7 @@
+ 	      location = gimple_location (last);
+ 	      if (LOCATION_LOCUS (location) == UNKNOWN_LOCATION)
+ 		location = fun->function_end_locus;
++
+ 	      if (warning_at (location, OPT_Wreturn_type,
+ 			      "control reaches end of non-void function"))
+ 		suppress_warning (fun->decl, OPT_Wreturn_type);
+@@ -9688,14 +9721,47 @@
+ 		      || gimple_call_builtin_p (last, ubsan_missing_ret)))
+ 		{
+ 		  gimple_stmt_iterator gsi = gsi_for_stmt (last);
++      gimple_stmt_iterator gsi_last = gsi;
++
+ 		  gsi_prev_nondebug (&gsi);
+-		  gimple *prev = gsi_stmt (gsi);
++
++      gimple *prev = gsi_stmt (gsi);
+ 		  if (prev == NULL)
+ 		    location = UNKNOWN_LOCATION;
+ 		  else
+ 		    location = gimple_location (prev);
+ 		  if (LOCATION_LOCUS (location) == UNKNOWN_LOCATION)
+ 		    location = fun->function_end_locus;
++
++      /* MODIFY:
++        If caught __builtin_unreachable (), creates a new stmt - return. Return
++        value is taken from -ftrivial-auto-var-init */
++
++      tree type = TREE_TYPE (TREE_TYPE (fun->decl));  
++      
++      if (COMPLETE_TYPE_P (type)) {
++        gsi = gsi_last;
++
++        if (!TREE_ADDRESSABLE (type)) {
++          tree tmp_decl = create_tmp_var (type, "artret");
++          gimple_init_for_auto_var(tmp_decl, flag_auto_var_init, &gsi);
++
++          greturn* ret_stmt = gimple_build_return (tmp_decl);
++          gsi_insert_after (&gsi, ret_stmt, GSI_NEW_STMT);
++        }
++        else {
++          tree ret_val = build1(INDIRECT_REF, type, DECL_RESULT(fun->decl));
++
++          gimple_init_for_auto_var(ret_val, flag_auto_var_init, &gsi);
++
++          greturn* ret_stmt = gimple_build_return (DECL_RESULT(fun->decl));
++          gsi_insert_after (&gsi, ret_stmt, GSI_NEW_STMT);
++        }
++
++        edge e = make_edge (bb, EXIT_BLOCK_PTR_FOR_FN(fun), 0);
++        e->goto_locus = location;
++      }
++
+ 		  if (warning_at (location, OPT_Wreturn_type,
+ 				  "control reaches end of non-void function"))
+ 		    suppress_warning (fun->decl, OPT_Wreturn_type);
+Only in gcc-13.2.0_old/: .gitignore
+Only in gcc-13.2.0_old/: gotools
+Only in gcc-13.2.0_old/: INSTALL
+Only in gcc-13.2.0_old/: libada
+Only in gcc-13.2.0_old/: libffi
+Only in gcc-13.2.0_old/: libgfortran
+Only in gcc-13.2.0_old/: libiberty
+Only in gcc-13.2.0_old/: libitm
+Only in gcc-13.2.0_old/: libsanitizer
+Only in gcc-13.2.0_old/: lto-plugin
+Only in gcc-13.2.0_old/: multilib.am
+Only in gcc-13.2.0_old/: NEWS
+Only in gcc-13.2.0/: serdep.tmp
+Only in gcc-13.2.0/: stage_current
+Only in gcc-13.2.0_old/: ylwrap
