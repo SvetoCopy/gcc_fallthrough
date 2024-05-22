@@ -3,7 +3,22 @@
 <h2>Проблема</h2>
 <p>Представим, что у нас есть какая-то non-void функция foo(int c), которая не во всех случаях возвращает значение. Например, в данном коде не возвращается значение при с != 0:</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/a686eca5-fb5b-41e6-b020-147c1d69b750)
+```c++
+#include <stdio.h>
+#include <stdlib.h>
+
+int foo(int c)
+{
+    if (!c)
+        return 42;
+    fputs("Oops\n", stderr);
+}
+
+int main(int argc, char **argv)
+{
+    foo(argc);
+}
+```
 
 <p>Скомпилируем программу с различными флагами и посмотрим, что выводится в stderr:</p>
 
@@ -37,7 +52,22 @@
 <p></p>
 <p>Первый способ нерационален, программисту в этом случае придется прописывать инструкции возврата, даже когда постановка задачи предполагает только один случай. Например:</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/5a5ff4b0-be0a-49f9-9aac-483dca56992b)
+```c++
+#include <stdio.h>
+#include <stdlib.h>
+
+int foo(int c)
+{
+    if (1 == 1)
+        return 42;
+    fputs("Oops\n", stderr);
+}
+
+int main(int argc, char **argv)
+{
+    foo(argc);
+}
+```
 
 <p>Здесь не предполагается, что программа будет выполнять что-то кроме тела ветвления if (1 == 1). Однако компилятор должен будет запретить компиляцию такой программы.</p>
 <p>Будем далее рассматривать второй способ решения проблемы.</p>
@@ -61,15 +91,50 @@
 <h3>Пытаемся модифицировать генерацию __builtin_unreachable</h3>
 <p>После тщательного поиска, обнаруживаем функцию, которая по описанию похожа на то, что мы ищем:</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/0c262e51-7bf7-46cc-9a76-34c6ede8d7b2)
+```c++
+/* If a function that should end with a return in non-void
+   function doesn't obviously end with return, add ubsan
+   instrumentation code to verify it at runtime.  If -fsanitize=return
+   is not enabled, instrument __builtin_unreachable.  */
+
+static void
+cp_maybe_instrument_return (tree fndecl)
+```
 
 <p>После исследования тела функции находим место генерации нашего __builtin_unreachable</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/83e7e090-7832-4659-9f79-cdc2cd1c1ced)
+```c++
+location_t loc = DECL_SOURCE_LOCATION (fndecl);
+
+if (sanitize_flags_p (SANITIZE_RETURN, fndecl))
+  t = ubsan_instrument_return (loc);
+else
+  t = build_builtin_unreachable (BUILTINS_LOCATION);
+
+append_to_statement_list (t, p);
+```
 
 <p>Делаем тестовую модификацию для целочисленного типа:</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/bf3ae439-4949-4c95-b58f-4cf85dc137e8)
+```c++
+location_t loc = DECL_SOURCE_LOCATION (fndecl);
+
+if (sanitize_flags_p (SANITIZE_RETURN, fndecl))
+  t = ubsan_instrument_return (loc);
+else {
+  if (INTEGRAL_TYPE_P(type)) {
+    tree ret_val = build_int_cst (type, 0);
+    tree decl = build_decl (loc, RESULT_DECL, NULL_TREE, type);
+    tree init_expr = build2 (INIT_EXPR, type, decl, ret_val);
+
+    t = build1 (RETURN_EXPR, void_type_node, init_expr);
+  }
+  else
+    t = build_builtin_unreachable (BUILTINS_LOCATION);
+}
+
+append_to_statement_list (t, p);
+```
 
 <p>После компиляции видим, что вставка инструкции возврата работает корректно, однако есть один недочет: невозможно вывести warning, если мы делаем патч в этом месте.</p>
 <p>Представим, что компилятор добавил инструкцию возврата для какой-то функции и не предупредил об этом. Тогда программист может <b>получать баги в своей программе и обнаружить их без предупреждения довольно тяжело.</b></p>
@@ -81,13 +146,52 @@
 <h3>Пытаемся модифицировать обработку __builtin_unreachable</h3>
 <p>Внутри одного из проходов замечаем обработку __builtin_unreachable на Gimple представлении:</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/58699f9c-ab51-4319-b99e-3dbade16ceac)
+```c++
+if (warning_at (location, OPT_Wreturn_type,
+  "control reaches end of non-void function"))
+  suppress_warning (fun->decl, OPT_Wreturn_type);
+        
+break;
+}
+```
 
 <p>Таким образом, делаем модификацию в этом месте, оставляя вывод предупреждения:</p>
 
-![image](https://github.com/SvetoCopy/gcc_fallthrough/assets/65361271/e37e378c-223b-4157-9569-1d0cb4e86228)
+```c++
+tree type = TREE_TYPE (TREE_TYPE (fun->decl));  
+      
+if (COMPLETE_TYPE_P (type)) {
+  gsi = gsi_last;
 
-<p>Добавляем также обработку флага -ftrivial-auto-var-init и получаем нашу модификацию</p>
+  if (!TREE_ADDRESSABLE (type)) {
+    tree tmp_decl = create_tmp_var (type, "artret");
+    gimple_init_for_auto_var(tmp_decl, flag_auto_var_init, &gsi);
+
+    greturn* ret_stmt = gimple_build_return (tmp_decl);
+    gsi_insert_after (&gsi, ret_stmt, GSI_NEW_STMT);
+  }
+  else {
+    tree ret_val = build1(INDIRECT_REF, type, DECL_RESULT(fun->decl));
+
+    gimple_init_for_auto_var(ret_val, flag_auto_var_init, &gsi);
+
+    greturn* ret_stmt = gimple_build_return (DECL_RESULT(fun->decl));
+    gsi_insert_after (&gsi, ret_stmt, GSI_NEW_STMT);
+  }
+
+  edge e = make_edge (bb, EXIT_BLOCK_PTR_FOR_FN(fun), 0);
+  e->goto_locus = location;
+}
+
+if (warning_at (location, OPT_Wreturn_type,
+  "control reaches end of non-void function"))
+  suppress_warning (fun->decl, OPT_Wreturn_type);
+        
+break;
+}
+```
+<p>Здесь обработан случай с возвращемым значением в виде структуры (необходимо было отдельно выделить этот случай из-за особенностей архитектуры gcc). А также добавлена возможность задавать стандартные значения через flag_auto_var_init
+</p>
 
 <h2>Заключение</h2>
 <p>В итоге, модификация прошла все стандартные тесты GCC, то есть патч не повлиял на работу компилятора, кроме нашего случая. Также были пройдены небольшие тесты на работоспособность патча при различных возвращаемых типах.
